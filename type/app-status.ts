@@ -1,0 +1,4 @@
+export enum APP_STATUS {
+  BEFORE_MOUNTED = 'BEFORE_MOUNTED',
+  MOUNTED = 'MOUNTED',
+}
