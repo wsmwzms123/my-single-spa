@@ -3,7 +3,8 @@ import * as Vue from 'vue'
 import React from'react'
 import ReactDOM from 'react-dom';
 
-const miniSpa = new MiniSpa()
+const miniSpa = MiniSpa.getInstance()
+console.log("🚀 ~ miniSpa:", miniSpa)
 
 let vueApp
 miniSpa.registerApp({

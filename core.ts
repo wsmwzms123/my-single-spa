@@ -1,94 +1,143 @@
-import { APP_STATUS } from './type/app-status'
+import { AppStatus, AppConfig, MicroApp, activeWhen } from './type'
+import { HistoryController, createHistoryController } from './history'
 import { isPromise } from './utils'
 
-export default class MiniSpa {
-  private apps = new Map()
+export  default class MiniSpa {
+  private static miniSpa: MiniSpa
+  private apps: Map<string, MicroApp> = new Map()
+  private historyController: HistoryController
+  private isStarted = false
 
-  constructor() {
-   window.apps = this.apps
-    this.addHashChangeEvent()
-    this.historyOverride()
+  static  getInstance(): MiniSpa {
+    if (!(this.miniSpa instanceof MiniSpa)) this.miniSpa = new MiniSpa()
+      return this.miniSpa
+  }
+  
+  private constructor() {
+    this.historyController = createHistoryController(this.loadApps.bind(this))
   }
 
-  async registerApp(app) {
-    if (this.apps.has(app.name)) {
-      throw new Error(`app ${app.name} is already registered`)
+  public registerApp(config: AppConfig): void {
+    if (this.apps.has(config.name)) {
+      throw new Error(`Application ${config.name} is already registered`)
     }
 
-    this.apps.set(app.name, {
-      loadApp: app.loadApp.bind(app),
-      status: APP_STATUS.BEFORE_MOUNTED,
-      unpacked: false,
-      active: typeof app.active === 'function' ? app.active.bind(app) : () => app.active === location.pathname,
-      bootstrap: null,
-      mount: null,
-      unmount: null,
-    })
-  }
-  unRegisterApp(name: string) {
-    if (this.apps.has(name)) {
-      this.apps.delete(name)
+    if (typeof config.active === 'string') {
+      const path = config.active
+      config.active = (location = window.location) => location.pathname === path
     }
-  }
 
-  addHashChangeEvent() {
-    ;['popstate', 'hashchange'].forEach((event) => {
-      window.addEventListener(event, this.loadApp.bind(this), true)
+    this.apps.set(config.name, {
+      ...config,
+      status: AppStatus.BEFORE_BOOTSTRAP,
     })
   }
 
-  historyOverride() {
-    ;['pushState', 'replaceState'].forEach((method) => {
-      const original = window.history[method]
-      window.history[method] = (...args) => {
-        const result = original.apply(window.history, args)
-        this.loadApp()
-        return result
-      }
-    })
+  public unregisterApp(name: string): void {
+    if (!this.apps.has(name)) {
+      console.warn(`Application ${name} is not registered`)
+      return
+    }
+
+    const app = this.apps.get(name)!
+    if (app.status === AppStatus.MOUNTED) {
+      console.warn(`Cannot unregister mounted app ${name}`)
+      return
+    }
+
+    this.apps.delete(name)
   }
 
-  async appUnpack(app) {
-    if (!app.unpacked) {
-      let loadedApp = app.loadApp()
-      const { unmount, mount, bootstrap } = isPromise(loadedApp) ? await loadedApp : loadedApp
 
-      app.unmount = unmount
-      app.mount = mount
-      app.bootstrap = bootstrap
-      app.unpacked = true
+  public async start(): Promise<void> {
+    if (this.isStarted) {
+      console.warn('MiniSpa is already started')
+      return
+    }
+
+    this.historyController.start()
+    await this.loadApps()
+    this.isStarted = true
+  }
+
+  public async destroy(): Promise<void> {
+    this.historyController.destroy()
+    await this.unmountAllApps()
+    this.apps.clear()
+    this.isStarted = false
+  }
+
+  private async loadApps(): Promise<void> {
+    try {
+      await this.unmountInactiveApps()
+      await this.mountActiveApps()
+    } catch (error) {
+      console.error('Error loading apps:', error)
+      this.handleError(error as Error)
     }
   }
 
-  async unmountApp() {
-    for (const app of this.apps.values()) {
-      if (app.status === APP_STATUS.MOUNTED  && !app.active()) {
-        await this.appUnpack(app)
+  private async unmountInactiveApps(): Promise<void> {
+    const unmountPromises = Array.from(this.apps.values())
+      .filter((app) => app.status === AppStatus.MOUNTED && !(app.active as activeWhen)())
+      .map((app) => this.unmountApp(app))
 
-        await app.unmount()
+    await Promise.all(unmountPromises)
+  }
 
-        app.status = APP_STATUS.BEFORE_MOUNTED
+  private async mountActiveApps(): Promise<void> {
+    const mountPromises = Array.from(this.apps.values())
+      .filter((app) => app.status === AppStatus.BEFORE_BOOTSTRAP && (app.active as activeWhen)())
+      .map((app) => this.mountApp(app))
+
+    await Promise.all(mountPromises)
+  }
+
+  private async mountApp(app: MicroApp): Promise<void> {
+    try {
+      app.status = AppStatus.BEFORE_BOOTSTRAP
+
+      if (!app.lifecycle) {
+        const lifecycle = app.loadApp()
+        app.lifecycle = isPromise(lifecycle) ? await lifecycle : lifecycle
       }
+
+      app.status = AppStatus.BEFORE_MOUNT
+      await app.lifecycle?.bootstrap?.()
+      await app.lifecycle.mount()
+      app.status = AppStatus.MOUNTED
+    } catch (error) {
+      app.status = AppStatus.ERROR
+      app.error = error as Error
+      this.handleError(error as Error)
     }
   }
 
-  async mountApp() {
-    for (const app of this.apps.values()) {
-      if (app.status === APP_STATUS.BEFORE_MOUNTED && app.active()) {
-        await this.appUnpack(app)
-        app?.bootstrap()
-        await app.mount()
-        app.status = APP_STATUS.MOUNTED
-      }
+  private async unmountApp(app: MicroApp): Promise<void> {
+    try {
+      app.status = AppStatus.UNMOUNTING
+      await app.lifecycle?.unmount()
+      app.status = AppStatus.BEFORE_BOOTSTRAP
+    } catch (error) {
+      app.status = AppStatus.ERROR
+      app.error = error as Error
+      this.handleError(error as Error)
     }
   }
 
-  async loadApp() {
-    await this.unmountApp()
-    await this.mountApp()
+  getAppStatus() {
+    
   }
 
-  start(): void {
-    this.loadApp()
+  private async unmountAllApps(): Promise<void> {
+    const unmountPromises = Array.from(this.apps.values())
+      .filter((app) => app.status === AppStatus.MOUNTED)
+      .map((app) => this.unmountApp(app))
+
+    await Promise.all(unmountPromises)
+  }
+
+  private handleError(error: Error): void {
+    console.error('Micro app error:', error)
   }
 }
