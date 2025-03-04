@@ -62,7 +62,7 @@ export default class MiniSpa {
 
   async unmountApp() {
     for (const app of this.apps.values()) {
-      if (app.status === APP_STATUS.MOUNTED) {
+      if (app.status === APP_STATUS.MOUNTED  && !app.active()) {
         await this.appUnpack(app)
 
         await app.unmount()
